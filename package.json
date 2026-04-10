@@ -1,0 +1,43 @@
+{
+  "name": "codex-claude-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local proof-of-concept bridge that accepts Anthropic-style requests and routes them into ChatGPT-authenticated Codex without API keys.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "diagnostics:compat": "tsx scripts/print-compatibility-report.ts",
+    "smoke:exec": "tsx scripts/smoke-exec.ts",
+    "smoke:app-server": "tsx scripts/smoke-app-server.ts",
+    "probe:app-server": "tsx scripts/probe-app-server.ts",
+    "smoke:router": "tsx scripts/smoke-router.ts",
+    "smoke:delegate": "tsx scripts/smoke-delegate.ts",
+    "smoke:refine": "tsx scripts/smoke-refine.ts",
+    "smoke:review": "tsx scripts/smoke-review.ts",
+    "smoke:adversarial-review": "tsx scripts/smoke-adversarial-review.ts",
+    "smoke:review-judgment": "tsx scripts/smoke-review-judgment.ts",
+    "smoke:proxy": "tsx scripts/smoke-proxy.ts",
+    "smoke:claude": "tsx scripts/smoke-claude-cli.ts",
+    "smoke:background": "tsx scripts/smoke-background.ts",
+    "smoke:tools": "tsx scripts/smoke-tools.ts",
+    "smoke:claude-tools": "tsx scripts/smoke-claude-tools.ts",
+    "smoke:delegate-workflow": "tsx scripts/smoke-delegate-workflow.ts"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "gray-matter": "^4.0.3",
+    "toml": "^3.0.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.14.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3"
+  }
+}

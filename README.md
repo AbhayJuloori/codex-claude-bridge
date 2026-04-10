@@ -296,6 +296,53 @@ Observed locally:
 - `src/tools/executor.ts`
 - `src/tools/loop.ts`
 
+## /delegate — Claude Plans, Codex Builds
+
+The `/delegate` endpoint implements the **advisor strategy**: Claude plans + quality-gates, Codex executes. Claude spends ~5–10k tokens per project; Codex handles the bulk.
+
+### Trigger
+
+**Claude Code skill** (type in any Claude Code session):
+```
+/delegate build me an ML portfolio project with FastAPI backend and React frontend
+```
+
+**Direct API** (for scripts or other tools):
+```bash
+curl -X POST http://localhost:8787/delegate \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer codex-bridge-local" \
+  -d @manifest.json
+```
+
+### Domain-Aware Quality Gates
+
+| Domain | Codex role | Claude role |
+|--------|-----------|-------------|
+| `backend`, `ml`, `data`, `test` | Primary builder | Review → accept/patch |
+| `ui`, `frontend` | Build skeleton only | **Always rewrites** to production quality |
+| `architecture` | Skipped | Claude handles directly |
+
+### Codex Skills (auto-injected)
+
+- `skills/testing/` — test-first patterns, pytest/jest
+- `skills/code-quality/` — types, naming, error handling
+- `skills/project-structure/` — conventional layouts
+- `skills/ui-baseline/` — functional skeleton (Claude rewrites visual quality)
+- `skills/ml-patterns/` — reproducible ML, train/val splits, persistence
+
+### Project Memory
+
+`.delegate/context.md` is updated after each phase — Codex reads it at task start to avoid cross-phase contradictions.
+
+### Smoke test
+
+```bash
+CODEX_ADAPTER=exec npm run dev &
+sleep 3
+npx tsx scripts/smoke-delegate-workflow.ts
+```
+
 ## Biggest remaining blocker
 
 The bridge now better matches a local manager/worker/reviewer runtime, but the single biggest blocker to a true Claude-manager plus Codex-worker fusion is still the lack of an officially documented ChatGPT-authenticated Codex raw model interface and the lack of a real Anthropic Claude runtime stage inside the bridge.
