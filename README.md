@@ -1,8 +1,16 @@
 # codex-claude-bridge
 
-`codex-claude-bridge` is a local Claude compatibility runtime that accepts Anthropic-style traffic from Claude CLI and routes execution into ChatGPT-authenticated Codex without `OPENAI_API_KEY`, Anthropic runtime billing, OpenRouter, or other paid API services.
+> **Claude tokens are precious. Stop spending them on boilerplate.**
 
-The runtime now behaves as a hybrid orchestration system:
+If you have **Claude Code** (Anthropic subscription) and **ChatGPT Plus** (OpenAI subscription) — you already have everything you need. No OpenAI API key. No Anthropic API billing. Just two subscriptions you're already paying for, working together.
+
+`codex-claude-bridge` is a local proxy that routes your Claude CLI traffic into a hybrid runtime: **Claude thinks, Codex builds.** Mechanical implementation — file writes, boilerplate, refactors, tests — gets offloaded to Codex. Claude only touches the work that actually needs judgment. In practice this cuts Claude token usage by ~94% on implementation-heavy sessions.
+
+**The setup:**
+- Claude = ideation, planning, routing, quality gates (~5–10k tokens per project)
+- Codex = all implementation, file reads/writes, execution (runs on ChatGPT Plus, no API key)
+
+The runtime behaves as a hybrid orchestration system:
 
 - manager/router path for higher-judgment tasks
 - Codex worker path for implementation-heavy tasks
