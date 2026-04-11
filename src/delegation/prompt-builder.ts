@@ -11,7 +11,7 @@ export class CodexPromptBuilder {
   build(task: DelegateTask, memory: string): string {
     const isUI = task.domain.includes("ui") || task.domain.includes("frontend");
     const skillContent = this.skills.renderForPrompt(task.domain as DomainTag[]);
-    const acceptanceList = task.acceptance.map((a) => `- ${a}`).join("\n");
+    const acceptanceList = task.acceptance.map((a: string) => `- ${a}`).join("\n");
 
     const sections: string[] = [
       `You are a precise implementation engine inside a Claude-managed delegation system.`,
@@ -38,11 +38,9 @@ export class CodexPromptBuilder {
     );
 
     sections.push(
-      `# OUTPUT FORMAT:\n` +
-      `Return ONLY a single fenced \`\`\`bridge-packet block with this JSON shape:\n` +
-      `{"type":"implementation_result","mode":"implement","task":"${task.id}","status":"completed|partial|failed",` +
-      `"filesChanged":["..."],"summary":["..."],"commandsRun":["..."],"keyDecisions":["..."],` +
-      `"warnings":["..."],"suggestedNextStep":null,"diffSummary":["..."],"confidence":0.0}`
+      `# OUTPUT FORMAT:
+Return ONLY a single fenced \`\`\`bridge-packet block with this JSON shape:
+{"type":"implementation_result","mode":"implement","task":"${task.id}","status":"completed|partial|failed","filesChanged":["..."],"summary":["..."],"commandsRun":["..."],"keyDecisions":["..."],"warnings":["..."],"suggestedNextStep":null,"diffSummary":["..."],"confidence":0.0}`
     );
 
     return sections.join("\n\n");
@@ -60,6 +58,6 @@ export class CodexPromptBuilder {
       `---\n\n# ORIGINAL TASK:\n${originalTask.prompt}`,
       `---\n\n# BASELINE OUTPUT TO REWRITE:\n${baselineOutput}`,
       `# OUTPUT:\nReturn the complete rewritten implementation. Production-quality. No placeholders.`
-    ].filter(Boolean).join("\n\n");
+    ].filter((section): section is string => Boolean(section)).join("\n\n");
   }
 }

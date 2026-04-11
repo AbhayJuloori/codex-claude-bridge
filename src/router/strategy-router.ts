@@ -17,9 +17,13 @@ function latestUserText(task: InternalTask): string {
     return latest.content;
   }
 
-  return latest.content
+  const text = latest.content
     .map((block) => ("text" in block && typeof block.text === "string" ? block.text : ""))
-    .join("\n");
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+
+  return text || task.prompt;
 }
 
 /**
@@ -142,27 +146,25 @@ export async function routeTask(
         };
       }
 
-      return fallbackRoute(
-        task,
-        "Claude routing response could not be parsed — using fallback"
+      return claudeFailureRoute(
+        "Claude routing response could not be parsed — defaulting to claude_direct"
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return fallbackRoute(task, `Claude routing failed: ${message}`);
+      return claudeFailureRoute(`Claude routing failed: ${message}`);
     }
   }
 
-  return fallbackRoute(
+  return heuristicFallbackRoute(
     task,
     "No Claude subprocess available — using conservative heuristic fallback"
   );
 }
 
 /**
- * Conservative fallback used only when Claude routing is unavailable or fails.
- * Defaults to claude_direct for anything ambiguous so quality is not sacrificed.
+ * Conservative fallback used only when Claude routing is unavailable.
  */
-function fallbackRoute(task: InternalTask, reason: string): StrategyDecision {
+function heuristicFallbackRoute(task: InternalTask, reason: string): StrategyDecision {
   const text = latestUserText(task).toLowerCase();
   const hasImplementation =
     /\bimplement\b|\bscaffold\b|\brefactor\b|\bedit\b|\bchange\b|\bwrite\b|\bcreate\b|\badd\b|\bfix\b/.test(
@@ -179,5 +181,12 @@ function fallbackRoute(task: InternalTask, reason: string): StrategyDecision {
   return {
     mode: "claude_direct",
     rationale: [`Fallback: defaulting to claude_direct to preserve quality. (${reason})`]
+  };
+}
+
+function claudeFailureRoute(reason: string): StrategyDecision {
+  return {
+    mode: "claude_direct",
+    rationale: [`Fallback: defaulting to claude_direct after Claude routing failure. (${reason})`]
   };
 }

@@ -24,7 +24,8 @@ function isUITask(task: DelegateTask): boolean {
 async function runCodexTask(
   adapter: CodexAdapter,
   baseTask: InternalTask,
-  taskPrompt: string
+  taskPrompt: string,
+  signal?: AbortSignal
 ): Promise<string> {
   const workerTask: InternalTask = {
     ...baseTask,
@@ -34,7 +35,7 @@ async function runCodexTask(
   };
 
   let finalText = "";
-  for await (const event of adapter.execute(workerTask)) {
+  for await (const event of adapter.execute(workerTask, { signal })) {
     if (event.type === "text-delta") finalText += event.text;
     if (event.type === "completed") finalText = event.finalText;
   }
@@ -81,8 +82,11 @@ async function claudeGatePhase(
         return { verdict: parsed.verdict, summary: parsed.summary };
       }
     }
-  } catch {
-    // fallback below
+  } catch (err) {
+    return {
+      verdict: "escalated",
+      summary: `Gate review failed: ${err instanceof Error ? err.message : String(err)}`
+    };
   }
 
   return {
@@ -141,9 +145,17 @@ export class DelegationOrchestrator {
       const resolvedResults: TaskResult[] = [];
 
       // Execute tasks — parallel if phase.parallel, sequential otherwise
-      const executeTask = async (task: DelegateTask): Promise<TaskResult> => {
+      const executeTask = async (
+        task: DelegateTask,
+        signal?: AbortSignal
+      ): Promise<TaskResult> => {
         const taskPrompt = this.promptBuilder.build(task, memoryContext);
-        let output = await runCodexTask(this.workerAdapter, baseTask, taskPrompt);
+        let output = await runCodexTask(
+          this.workerAdapter,
+          baseTask,
+          taskPrompt,
+          signal
+        );
         let claudeRewritten = false;
 
         if (isUITask(task) && this.claude) {
@@ -164,8 +176,8 @@ export class DelegationOrchestrator {
         return {
           taskId: task.id,
           domain: task.domain,
-          status: packet?.status ?? "partial",
-          output,
+          status: packet?.status ?? "failed",
+          output: packet ? output : `${output}${output ? "\n" : ""}[packet parse failed]`,
           claudeRewritten
         };
       };
@@ -179,7 +191,19 @@ export class DelegationOrchestrator {
       }
 
       const results = phase.parallel
-        ? await Promise.all(phase.tasks.map(executeTask))
+        ? await (async () => {
+            const phaseAbortController = new AbortController();
+            try {
+              return await Promise.all(
+                phase.tasks.map((task) =>
+                  executeTask(task, phaseAbortController.signal)
+                )
+              );
+            } catch (err) {
+              phaseAbortController.abort();
+              throw err;
+            }
+          })()
         : await (async () => {
             const seq: TaskResult[] = [];
             for (const task of phase.tasks) {
