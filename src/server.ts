@@ -26,6 +26,7 @@ import { delegateManifestSchema } from "./delegation/manifest.js";
 import { DelegationOrchestrator } from "./delegation/orchestrator.js";
 import { ClaudeSubprocessManager } from "./claude/subprocess.js";
 import { createBaseAdapter } from "./adapters/index.js";
+import { runPipeline } from "./pipeline/pipeline.js";
 
 function getRequestId(): string {
   return crypto.randomUUID();
@@ -772,6 +773,59 @@ export function createServer(config: BridgeConfig, logger: Logger, adapter: Code
 
     response.write("data: [DONE]\n\n");
     response.end();
+  });
+
+  app.post("/pipeline", async (request: Request, response: Response) => {
+    const body = request.body as { prompt?: string };
+    const prompt = body.prompt?.trim();
+
+    if (!prompt) {
+      response.status(400).json({ error: "prompt required" });
+      return;
+    }
+
+    const requestId = getRequestId();
+    const sessionId = getSessionId(request);
+    const context = compatibilityLoader.load();
+
+    const baseTask: InternalTask = {
+      requestId,
+      sessionId,
+      requestedModel: "codex",
+      maxTokens: 8192,
+      stream: false,
+      systemPrompt: "",
+      messages: [{ role: "user", content: prompt }],
+      tools: [],
+      prompt,
+      sourceRequest: {
+        model: "codex",
+        max_tokens: 8192,
+        stream: false,
+        messages: [{ role: "user", content: prompt }]
+      },
+      compatibilityContext: context,
+      permissionContext: {
+        mode: "default",
+        rules: [],
+        canEdit: true,
+        canRunCommands: true,
+        sandbox: config.codex.sandbox,
+        appServerApprovalPolicy: "on-request",
+        parityNotes: []
+      },
+      selectedSkills: [],
+      selectedAgent: null,
+      inputItems: [{ type: "text", text: prompt }]
+    };
+
+    try {
+      const result = await runPipeline(baseTask, delegateClaude, delegateWorker);
+      response.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      response.status(500).json({ error: message });
+    }
   });
 
   return app;
