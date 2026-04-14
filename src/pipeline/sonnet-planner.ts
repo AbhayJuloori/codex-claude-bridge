@@ -1,5 +1,6 @@
 import type { ClaudeSubprocessManager } from "../claude/subprocess.js";
 import { planResultSchema, type PlanResult, type StepSpec } from "./types.js";
+import { withRetry } from "./retry.js";
 
 const MAX_INVOCATIONS = 2;
 const TIMEOUT_MS = 45_000;
@@ -17,7 +18,7 @@ Return ONLY a JSON object — no prose, no markdown:
       "id": "step-N",
       "description": "one-line description",
       "prompt": "exact self-contained prompt for Codex",
-      "success_criteria": "deterministic check: what must be true when this step passes"
+      "success_criteria": "use format: output contains 'X' where X is a string that must appear in Codex output"
     }
   ],
   "escalation_triggers": ["condition that should escalate back to Sonnet"]
@@ -26,9 +27,10 @@ Return ONLY a JSON object — no prose, no markdown:
 Rules:
 - Each step independently executable by Codex
 - Prompts must be self-contained (no references to other steps)
-- success_criteria checkable without running code`;
+- success_criteria MUST use format: output contains 'X'`;
 
 export class SonnetPlanner {
+  /** Counts calls where the subprocess actually responded (success or parse failure). */
   private _invocationCount = 0;
 
   constructor(private readonly claude: ClaudeSubprocessManager) {}
@@ -45,15 +47,22 @@ export class SonnetPlanner {
       );
     }
 
-    this._invocationCount++;
-
+    let raw: string;
     try {
-      const raw = await this.claude.call(PLAN_PROMPT(task, compressedSpec), TIMEOUT_MS);
-      return parsePlanResponse(raw, task);
+      // Only increment AFTER a successful subprocess call.
+      // A subprocess crash (rate limit, auth) does NOT count as a Sonnet touch —
+      // the model never saw the task.
+      raw = await withRetry(() =>
+        this.claude.call(PLAN_PROMPT(task, compressedSpec), TIMEOUT_MS)
+      );
     } catch (err) {
-      if (err instanceof Error && err.message.includes("invocation limit")) throw err;
-      return singleStepFallback(task, compressedSpec);
+      // Subprocess failed after all retries. Propagate so caller can decide.
+      throw err;
     }
+
+    // Subprocess responded — count this invocation regardless of parse outcome.
+    this._invocationCount++;
+    return parsePlanResponse(raw, task);
   }
 }
 
@@ -72,7 +81,7 @@ function singleStepFallback(task: string, compressedSpec?: string): PlanResult {
     id: "step-fallback",
     description: "execute task as single step",
     prompt: compressedSpec ?? task,
-    success_criteria: "Codex produces non-empty output without error"
+    success_criteria: "output contains 'done'"
   };
   return { steps: [step], escalation_triggers: [] };
 }

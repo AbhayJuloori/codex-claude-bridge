@@ -2,7 +2,7 @@ import type { CodexAdapter } from "../adapters/base.js";
 import type { ClaudeSubprocessManager } from "../claude/subprocess.js";
 import type { InternalTask } from "../types/internal.js";
 import type { PipelineResult, StepSpec } from "./types.js";
-import { HaikuClassifier } from "./haiku-classifier.js";
+import { HaikuClassifier, HaikuClassifierError } from "./haiku-classifier.js";
 import { ContextDistiller } from "./context-distiller.js";
 import { SonnetPlanner } from "./sonnet-planner.js";
 import { StepExecutor } from "./step-executor.js";
@@ -26,21 +26,43 @@ export async function runPipeline(
   const gate = new Gate();
   const controller = new PipelineController({
     max_retries_per_step: opts.max_retries_per_step ?? 2,
-    max_total_steps: 99 // overridden by computeBudget after planning
+    max_total_steps: 99
   });
 
-  // Layer 1: classify
-  const classification = await classifier.classify(task.prompt);
+  const warnings: string[] = [];
 
-  // Layer 2: distill spec
-  let compressedSpec: string;
+  // ── Layer 1: classify ────────────────────────────────────────────────────
+  // Fix #1: HaikuClassifierError means the system failed, not the task is ambiguous.
+  // Surface it as "failed" rather than silently routing to surface_to_user.
+  let classification;
   try {
-    compressedSpec = await distiller.distill(classification.compressed_spec || task.prompt);
-  } catch {
-    compressedSpec = task.prompt.slice(0, 800);
+    classification = await classifier.classify(task.prompt);
+  } catch (err) {
+    if (err instanceof HaikuClassifierError) {
+      return {
+        status: "failed",
+        output: err.message,
+        steps_executed: 0,
+        sonnet_invocations: 0,
+        escalation_summary: "Classification unavailable — retry later"
+      };
+    }
+    throw err;
   }
 
-  // External routing
+  // ── Layer 2: distill spec ────────────────────────────────────────────────
+  // Fix #7: Classifier and distiller share the same Haiku subprocess path.
+  // They are already sequential here, and withRetry inside each adds backoff,
+  // so rapid back-to-back calls naturally space out on transient failures.
+  //
+  // Fix #5: DistillResult surfaces compression failure rather than silently truncating.
+  const distillResult = await distiller.distill(classification.compressed_spec || task.prompt);
+  if (distillResult.compressionError) {
+    warnings.push(`context_distillation: ${distillResult.compressionError}`);
+  }
+  const compressedSpec = distillResult.content;
+
+  // ── External routing ─────────────────────────────────────────────────────
   const route = controller.getRoute(classification);
 
   if (route === "surface_to_user") {
@@ -48,26 +70,34 @@ export async function runPipeline(
     return { status: "ambiguous", output: question, steps_executed: 0, sonnet_invocations: 0 };
   }
 
-  // Layer 3: optionally plan with Sonnet
+  // ── Layer 3: optionally plan with Sonnet ─────────────────────────────────
   let steps: StepSpec[] = [
     {
       id: "step-direct",
       description: "execute task directly",
       prompt: compressedSpec,
-      success_criteria: "Codex produces non-empty output without error"
+      success_criteria: "output contains 'done'"
     }
   ];
   let escalationTriggers: string[] = [];
 
   if (route === "sonnet_plan") {
-    const plan = await planner.plan(task.prompt, compressedSpec);
-    steps = plan.steps;
-    escalationTriggers = plan.escalation_triggers;
+    try {
+      const plan = await planner.plan(task.prompt, compressedSpec);
+      steps = plan.steps;
+      escalationTriggers = plan.escalation_triggers;
+    } catch (err) {
+      // Fix #2: subprocess failure (not invocation limit) — invocation count was NOT
+      // incremented. Fall back to single-step with the compressed spec.
+      const isLimitError = err instanceof Error && err.message.includes("invocation limit");
+      if (isLimitError) throw err; // architectural violation — bubble up
+      warnings.push(`sonnet_planner: subprocess failed, using single-step fallback`);
+    }
   }
 
   const plan = { steps, escalation_triggers: escalationTriggers };
 
-  // Codex execution loop — controlled externally
+  // ── Codex execution loop (controlled externally) ─────────────────────────
   let totalSteps = 0;
   const outputs: string[] = [];
 
@@ -90,8 +120,11 @@ export async function runPipeline(
         try {
           await planner.plan(reviewPrompt);
           escalationSummary += " Sonnet review complete.";
-        } catch {
-          escalationSummary += " Sonnet invocation limit reached — no further review.";
+        } catch (err) {
+          const isLimit = err instanceof Error && err.message.includes("invocation limit");
+          escalationSummary += isLimit
+            ? " Sonnet invocation limit reached."
+            : " Sonnet review subprocess failed.";
         }
 
         return {
@@ -99,7 +132,7 @@ export async function runPipeline(
           output: outputs.join("\n\n"),
           steps_executed: totalSteps,
           sonnet_invocations: planner.invocationCount,
-          escalation_summary: escalationSummary
+          escalation_summary: escalationSummary + (warnings.length ? ` Warnings: ${warnings.join("; ")}` : "")
         };
       }
 
@@ -119,6 +152,7 @@ export async function runPipeline(
     status: "completed",
     output: outputs.join("\n\n"),
     steps_executed: totalSteps,
-    sonnet_invocations: planner.invocationCount
+    sonnet_invocations: planner.invocationCount,
+    ...(warnings.length && { escalation_summary: `Warnings: ${warnings.join("; ")}` })
   };
 }
