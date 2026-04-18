@@ -76,7 +76,7 @@ export async function runPipeline(
       id: "step-direct",
       description: "execute task directly",
       prompt: compressedSpec,
-      success_criteria: "output contains 'done'"
+      success_criteria: "non-empty output"
     }
   ];
   let escalationTriggers: string[] = [];

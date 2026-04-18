@@ -28,7 +28,8 @@
     "smoke:tools": "tsx scripts/smoke-tools.ts",
     "smoke:claude-tools": "tsx scripts/smoke-claude-tools.ts",
     "smoke:delegate-workflow": "tsx scripts/smoke-delegate-workflow.ts",
-    "smoke:pipeline": "tsx scripts/smoke-pipeline.ts"
+    "smoke:pipeline": "tsx scripts/smoke-pipeline.ts",
+    "analyze:pipeline": "node --import tsx/esm scripts/analyze-pipeline.ts"
   },
   "dependencies": {
     "express": "^4.21.2",
