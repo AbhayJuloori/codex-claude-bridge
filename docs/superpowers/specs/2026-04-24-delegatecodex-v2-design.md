@@ -15,8 +15,13 @@ The existing `src/pipeline/` (v1) achieves token savings by routing through Haik
 Claude's touch is preserved by shifting its role from *doing* to *directing + judging*. Codex is the hands. Claude is the brain that never leaves — it plans precisely once and judges once.
 
 **Hard budget (default):**
-- `max_claude_calls = 2` (1 plan + 1 judge; repair rounds do not add Claude calls)
-- `max_repair_rounds = 2`
+- `max_claude_calls = 3` — slots are fixed:
+  - Call 1: Claude Dispatcher / Planner
+  - Call 2: Claude Judge after initial Codex execution
+  - Call 3: Claude Judge after all repair rounds complete (only if repair was requested)
+- `max_repair_rounds = 2` — Codex gets up to 2 repair attempts using the same `repair_instructions`; Claude Judge is NOT called between repair rounds
+- If budget exhausted before takeover is possible → return `status="needs_user_or_manual_review"` with latest `ExecutionPacket` + Judge feedback; no additional Claude call made
+- Claude Takeover is allowed only if budget remains OR mode has `allow_takeover=true` (e.g. `high_quality` mode)
 - `max_codex_turns` — configurable per mode
 - `max_wall_time_ms` — configurable per mode
 
@@ -29,8 +34,7 @@ POST /delegatecodex
         │
         ▼
   ┌─────────────────┐
-  │ Claude Dispatcher│  ← Sonnet, 1 call
-  │ (Planner)        │    produces ExecutionPlan
+  │ Claude Dispatcher│  ← Call 1 (Sonnet) → ExecutionPlan
   └────────┬────────┘
            │
     brain == "claude_leads"?
@@ -40,30 +44,37 @@ POST /delegatecodex
                   │
                   ▼
          ┌────────────────┐
-         │  Codex Agent   │  ← model + reasoning from plan
-         │                │    plugins: hint (Codex may add/change)
+         │  Codex Agent   │  ← model+reasoning from plan
+         │                │    plugins: hint (Codex may extend)
          │  subagents,    │    session: stateful | stateless
          │  plugins,      │    write_policy enforced
          │  skills        │
          └───────┬────────┘
                  │
                  ▼
-         ExecutionPacket  ← structured artifact from Codex
+         ExecutionPacket  ← structured artifact
                  │
                  ▼
          ┌──────────────┐
-         │ Claude Judge  │  ← Sonnet, 1 call
-         │               │    judges: plan + packet + diff + tests
-         └──────┬────────┘
+         │ Claude Judge  │  ← Call 2 (Sonnet)
+         └──────┬────────┘    judges: plan+packet+diff+tests
                 │
-        ┌───────┼──────────┐
-      ACCEPT  REPAIR    TAKEOVER
-        │       │           │
-      done   Codex fix   claude-takeover.ts
-             (≤2 rounds)  Claude handles
-             judge        directly
-             feedback
-             injected
+        ┌───────┼────────────────────┐
+      ACCEPT  REPAIR            TAKEOVER
+        │       │                    │
+      done   Codex fix (≤2 rounds)  budget left?
+             same repair_instructions  ├─ YES → claude-takeover.ts
+                    │                  └─ NO  → needs_user_or_manual_review
+                    ▼
+            ┌──────────────┐
+            │ Claude Judge  │  ← Call 3 (if budget allows)
+            └──────┬────────┘
+                   │
+          ┌────────┼──────────────────┐
+        ACCEPT  REPAIR/TAKEOVER  budget exhausted
+          │       │                    │
+        done  claude-takeover.ts  needs_user_or_manual_review
+                                  (packet + judge feedback returned)
 ```
 
 ---
@@ -224,12 +235,16 @@ const judgmentVerdictSchema = z.object({
 
 ## 7. Repair Loop
 
-- Max 2 rounds
-- Each round: inject `repair_instructions` into Codex prompt alongside original task + ExecutionPlan
-- Codex returns new ExecutionPacket
-- Claude Judge re-evaluates
-- After 2 failed repairs → forced `claude-takeover`
-- Repair rounds do NOT consume additional `max_claude_calls` budget (Judge is called but counted separately)
+**Budget allocation:** Claude Judge on repair uses Call 3 (the final budget slot).
+
+**Flow:**
+1. Claude Judge (Call 2) returns `verdict=repair` with `repair_instructions`
+2. Codex runs up to `max_repair_rounds=2` attempts using the same `repair_instructions` — no Judge call between rounds
+3. After all repair rounds finish, Claude Judge is called once more (Call 3) if budget allows
+4. Call 3 Judge returns `accept` → done; `repair` again or `takeover` → escalate to `claude-takeover`
+5. If Call 3 budget is not available → return `status="needs_user_or_manual_review"` with latest `ExecutionPacket` + last Judge feedback
+
+**Claude Takeover condition:** Budget remaining (`claude_calls_used < max_claude_calls`) OR `allow_takeover=true` on the mode. Never triggered by burning extra budget beyond the cap.
 
 ---
 
