@@ -747,8 +747,17 @@ git commit -m "feat(delegatecodex): add plugin-router — mode+task signals → 
 ```typescript
 /**
  * Tracks whether a Codex session exists for a given (conversationId, taskHash) key.
- * Stateful sessions use `codex exec resume --last` on repair rounds.
  * Session records expire after max_wall_time_ms (default 10 minutes).
+ *
+ * ⚠️  EXPERIMENTAL: `codex exec resume --last` path is NOT tested end-to-end.
+ * The session tracking (set/has/delete) IS tested. The resume invocation itself
+ * has not been validated against a live Codex process. If `codex exec resume`
+ * behaves unexpectedly, CodexAgent.run() will fail and the error will surface
+ * as an ExecutionPacket with status="failed". Safe to ship — just monitor logs.
+ *
+ * For v2.0, session_mode="stateful" tracks that a session exists but the resume
+ * path in CodexAgent uses `codex exec resume --last` only if `has(sessionKey)`
+ * returns true. On the first call it is always a fresh invocation.
  */
 
 const DEFAULT_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
@@ -925,6 +934,8 @@ export class CodexAgent {
     const args: string[] = [];
 
     if (hasExistingSession) {
+      // ⚠️  EXPERIMENTAL: resume --last not covered by unit tests.
+      // If this path causes unexpected behavior, set session_mode="stateless" in the plan.
       args.push("exec", "resume", "--last");
     } else {
       args.push("exec");
@@ -1026,26 +1037,75 @@ export class CodexAgent {
   private parsePacket(rawText: string, exitCode: number): ExecutionPacket {
     const stripped = stripFences(rawText.trim());
 
-    // Find last JSON object in output (Codex may output prose then JSON)
-    const lastBrace = stripped.lastIndexOf("{");
-    if (lastBrace === -1) return synthesizePacket(rawText, exitCode);
+    // Strategy 1: entire output is valid JSON
+    // (helpers defined as module-level functions below the class)
+    const direct = tryParsePacket(stripped);
+    if (direct) return direct;
 
-    const candidate = stripped.slice(lastBrace);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(candidate);
-    } catch {
-      return synthesizePacket(rawText, exitCode);
+    // Strategy 2: output has fenced JSON block — already stripped above, try again on original
+    const fenceMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/g);
+    if (fenceMatch) {
+      for (let i = fenceMatch.length - 1; i >= 0; i--) {
+        const inner = fenceMatch[i].replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+        const candidate = tryParsePacket(inner);
+        if (candidate) return candidate;
+      }
     }
 
-    const result = executionPacketSchema.safeParse(parsed);
-    if (result.success) return result.data;
+    // Strategy 3: scan for balanced {...} objects from the END of the text
+    // Walk backwards finding matching brace pairs; validate each with schema.
+    const balanced = extractBalancedJsonObjects(stripped);
+    for (let i = balanced.length - 1; i >= 0; i--) {
+      const candidate = tryParsePacket(balanced[i]);
+      if (candidate) return candidate;
+    }
 
-    this.logger.warn("codex-agent", "ExecutionPacket schema mismatch, synthesizing", {
-      issues: result.error.message,
+    this.logger.warn("codex-agent", "ExecutionPacket could not be parsed, synthesizing", {
+      rawSlice: rawText.slice(0, 200),
     });
     return synthesizePacket(rawText, exitCode);
   }
+}
+
+// ─── Module-level helpers ────────────────────────────────────────────────────
+
+/** Try to parse a string as ExecutionPacket. Returns null on any failure. */
+function tryParsePacket(text: string): ExecutionPacket | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const result = executionPacketSchema.safeParse(parsed);
+  return result.success ? result.data : null;
+}
+
+/**
+ * Extract all balanced top-level {...} objects from a string.
+ * Handles nested braces correctly. Returns them in document order.
+ * Ignores brace imbalance mid-string gracefully.
+ */
+function extractBalancedJsonObjects(text: string): string[] {
+  const objects: string[] = [];
+  let depth = 0;
+  let start = -1;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        objects.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+
+  return objects;
 }
 ```
 
@@ -1551,7 +1611,8 @@ export class ClaudeTakeover {
     verdict: JudgmentVerdict | undefined
   ): AsyncGenerator<string> {
     const prompt = buildTakeoverPrompt(task, plan, packet, verdict);
-    yield* this.claude.stream(prompt, TAKEOVER_TIMEOUT_MS);
+    // stream(prompt, signal?, timeoutMs?) — pass undefined for signal, explicit timeout
+    yield* this.claude.stream(prompt, undefined, TAKEOVER_TIMEOUT_MS);
   }
 }
 ```
@@ -1716,7 +1777,9 @@ export async function runDelegatecodex(
   }
 
   if (verdict.verdict === "takeover") {
-    const canTakeover = budget.claude_calls_used < budget.max_claude_calls || plan.allow_takeover;
+    // allow_takeover controls whether takeover is a permitted behavior, NOT budget bypass.
+    // Budget cap is always respected. Raise max_claude_calls in the plan if more budget is needed.
+    const canTakeover = plan.allow_takeover && budget.claude_calls_used < budget.max_claude_calls;
     if (!canTakeover) {
       emit({ type: "complete", status: "needs_user_or_manual_review" });
       return {
