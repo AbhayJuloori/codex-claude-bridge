@@ -15,3 +15,4 @@ codex-claude-bridge.config.json
 # local smoke/test artifacts
 .delegate-smoke/
 graphify-out/
+.worktrees/
