@@ -7,6 +7,7 @@ import { loadConfig } from "../src/config.js";
 import { Logger } from "../src/logger.js";
 import { ClaudeSubprocessManager } from "../src/claude/subprocess.js";
 import { HaikuClassifier } from "../src/pipeline/haiku-classifier.js";
+import { HaikuClarifier } from "../src/pipeline/haiku-clarifier.js";
 import { ContextDistiller, estimateTokens } from "../src/pipeline/context-distiller.js";
 import { SonnetPlanner } from "../src/pipeline/sonnet-planner.js";
 import { Gate } from "../src/pipeline/gate.js";
@@ -84,6 +85,35 @@ const DISTILLER_CASES = [
   { label: "short (pass-through)",   text: "rename foo to bar" },
   { label: "~400 tokens (compress)", text: "x".repeat(1600) },
   { label: "code block 500 tokens",  text: `function authenticate(req, res, next) {\n${"  // lots of code\n".repeat(80)}}` },
+];
+
+// ── Clarifier tests ──────────────────────────────────────────────────────────
+
+const CLARIFIER_CASES = [
+  {
+    label: "non-question output",
+    originalTask: "rename calculateTotal to computeTotal",
+    codexOutput: "Done. Renamed the function in src/utils.ts.",
+    expected: "not_question"
+  },
+  {
+    label: "question Haiku CAN answer",
+    originalTask: "Create /tmp/smoke-clarify-4.ts with exported greet(name) returning Hello name",
+    codexOutput: "Should I create this file in /tmp or in the current working directory?",
+    expected: "answered"
+  },
+  {
+    label: "question Haiku CANNOT answer",
+    originalTask: "Update the HTTP client to call the new internal logging endpoint",
+    codexOutput: "Which endpoint URL and request schema should I use for the logging service?",
+    expected: "needs_user"
+  },
+  {
+    label: "ends with question mark",
+    originalTask: "add logging to runPipeline",
+    codexOutput: "I can add logging. Should I use debug level or info level?",
+    expected: "answered"
+  },
 ];
 
 // ── Runner ────────────────────────────────────────────────────────────────────
@@ -182,6 +212,32 @@ async function runPlannerSample() {
   console.log(`\n  invocation_count: ${planner.invocationCount} / 2`);
 }
 
+async function runClarifierAnalysis() {
+  console.log("\n═══════════════════════════════════════════");
+  console.log("SECTION 5: Clarification handling (Haiku)");
+  console.log("═══════════════════════════════════════════");
+
+  const clarifier = new HaikuClarifier(claude);
+
+  for (const { label, originalTask, codexOutput, expected } of CLARIFIER_CASES) {
+    console.log(`\n  [${label}]`);
+    console.log(`  expected: ${expected}`);
+    try {
+      const result = await clarifier.clarify(originalTask, codexOutput);
+      console.log(`  type: ${result.type}`);
+      if (result.type === "answered") {
+        console.log(`  answer: "${result.answer}"`);
+      } else if (result.type === "needs_user") {
+        console.log(`  question: "${result.question}"`);
+      } else {
+        console.log("  answer/question: n/a");
+      }
+    } catch (err) {
+      console.log(`  ERROR: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
 async function main() {
   console.log("Pipeline Analysis Harness");
   console.log("Proxy-Layer @ " + config.codex.cwd);
@@ -190,6 +246,7 @@ async function main() {
   runGateAnalysis();  // sync — no network
   await runDistillerAnalysis();
   await runPlannerSample();
+  await runClarifierAnalysis();
 
   console.log("\n═══════════════════════════════════════════");
   console.log("DONE");

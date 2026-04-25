@@ -17,6 +17,8 @@ JSON schema:
   "requires_sonnet": boolean,
   "confidence": number (0-1),
   "compressed_spec": string (≤200 chars, essential info only),
+  "is_ui": boolean (true if task involves any UI component, page, style, layout, or visual output),
+  "success_criteria": string (optional: what a successful output looks like, in format 'output contains X'),
   "ambiguity_question": string (only if task_type is "ambiguous")
 }
 
@@ -27,6 +29,7 @@ Rules:
 - ambiguous: cannot classify without more info
 - requires_plan: true for multi_step and judgment
 - requires_sonnet: true for judgment and multi_step, false for mechanical
+- is_ui: true for any task involving React components, CSS, HTML, or visual layout
 - confidence: below 0.75 → set task_type to ambiguous`;
 
 /**

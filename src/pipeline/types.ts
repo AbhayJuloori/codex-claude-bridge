@@ -6,6 +6,8 @@ export const classificationResultSchema = z.object({
   requires_sonnet: z.boolean(),
   confidence: z.number().min(0).max(1),
   compressed_spec: z.string(),
+  is_ui: z.boolean().optional(),
+  success_criteria: z.string().optional(),
   ambiguity_question: z.string().optional()
 });
 
@@ -34,14 +36,20 @@ export const gateResultSchema = z.object({
 
 export type GateResult = z.infer<typeof gateResultSchema>;
 
+export type PipelineProgressEvent =
+  | { type: "classification"; classification: ClassificationResult }
+  | { type: "step_complete"; step: StepSpec; output: string; steps_executed: number }
+  | { type: "escalating"; step: StepSpec; retry_count: number; steps_executed: number; reason: string }
+  | { type: "takeover"; step: StepSpec; succeeded: boolean; output: string };
+
 export interface StepExecutionResult {
   step_id: string;
   output: string;
-  status: "success" | "failure" | "empty";
+  status: "success" | "failure" | "empty" | "needs_clarification";
 }
 
 export interface PipelineResult {
-  status: "completed" | "escalated" | "failed" | "ambiguous";
+  status: "completed" | "escalated" | "failed" | "ambiguous" | "needs_user_input";
   output: string;
   steps_executed: number;
   sonnet_invocations: number;

@@ -1,0 +1,20 @@
+{
+  "port": 8787,
+  "adapter": "auto",
+  "codex": {
+    "bin": "codex",
+    "cwd": ".",
+    "model": null,
+    "sandbox": "read-only",
+    "skipGitRepoCheck": true
+  },
+  "proxy": {
+    "requireBearer": true,
+    "bearerToken": "codex-bridge-local",
+    "allowEstimatedCountTokens": true
+  },
+  "logging": {
+    "level": "info",
+    "dir": ".logs"
+  }
+}

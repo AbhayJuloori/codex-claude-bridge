@@ -1,0 +1,17 @@
+node_modules
+dist
+.env
+.logs
+.state
+.tmp
+
+# local config (use .config.example.json as template)
+codex-claude-bridge.config.json
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# local smoke/test artifacts
+.delegate-smoke/
+graphify-out/

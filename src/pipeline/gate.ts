@@ -30,6 +30,11 @@ const INCOMPLETE_SIGNALS = [
   /\bFIXME\b/,
   /\bremains? (unimplemented|incomplete|to be done)\b/i,
   /\bleft as an exercise\b/i,
+  // security/quality gaps
+  /\bnot (yet )?(secured?|protected|authenticated?|authorized?)\b/i,
+  /\bwarning:/i,
+  /\bskipped?\b.*\b(check|validation|auth|security)\b/i,
+  /\bno (auth|authentication|authorization|security|validation) (yet|added|implemented)\b/i,
 ];
 
 export class Gate {

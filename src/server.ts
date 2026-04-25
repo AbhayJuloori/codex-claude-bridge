@@ -533,7 +533,11 @@ export function createServer(config: BridgeConfig, logger: Logger, adapter: Code
       }
     }
 
-    if (pipelineResult?.status === "completed" || pipelineResult?.status === "failed") {
+    if (
+      pipelineResult?.status === "completed" ||
+      pipelineResult?.status === "failed" ||
+      pipelineResult?.status === "needs_user_input"
+    ) {
       const outputTokens = estimateTokensFromText(pipelineResult.output);
 
       logger.info("http", "pipeline intercepted anthropic request", {
@@ -566,7 +570,7 @@ export function createServer(config: BridgeConfig, logger: Logger, adapter: Code
             finalText: pipelineResult.output
           }
         });
-      } else {
+      } else if (pipelineResult.status === "failed") {
         sessions.appendEvent(sessionId, {
           type: "request.failed",
           requestId,
@@ -959,6 +963,71 @@ export function createServer(config: BridgeConfig, logger: Logger, adapter: Code
       const message = err instanceof Error ? err.message : String(err);
       response.status(500).json({ error: message });
     }
+  });
+
+  app.post("/delegatecodex", async (request: Request, response: Response) => {
+    const task = (request.body as { task?: string }).task?.trim();
+    if (!task) {
+      response.status(400).json({ error: "task required" });
+      return;
+    }
+
+    const requestId = getRequestId();
+    const sessionId = getSessionId(request);
+    const context = compatibilityLoader.load();
+
+    response.setHeader("Content-Type", "text/event-stream");
+    response.setHeader("Cache-Control", "no-cache");
+    response.setHeader("Connection", "keep-alive");
+    response.flushHeaders();
+
+    const write = (payload: unknown) =>
+      response.write(`data: ${JSON.stringify(payload)}\n\n`);
+
+    const baseTask: InternalTask = {
+      requestId,
+      sessionId,
+      requestedModel: "codex",
+      maxTokens: 8192,
+      stream: false,
+      systemPrompt: "",
+      messages: [{ role: "user", content: task }],
+      tools: [],
+      prompt: task,
+      sourceRequest: {
+        model: "codex",
+        max_tokens: 8192,
+        stream: false,
+        messages: [{ role: "user", content: task }]
+      },
+      compatibilityContext: context,
+      permissionContext: {
+        mode: "default",
+        rules: [],
+        canEdit: true,
+        canRunCommands: true,
+        sandbox: config.codex.sandbox,
+        appServerApprovalPolicy: "on-request",
+        parityNotes: []
+      },
+      selectedSkills: [],
+      selectedAgent: null,
+      inputItems: [{ type: "text", text: task }]
+    };
+
+    try {
+      const result = await runPipeline(baseTask, delegateClaude, delegateWorker, {
+        onProgress: (event) => write(event)
+      });
+      write({ type: "result", ...result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error("delegatecodex", "pipeline failed", { requestId, error: message });
+      write({ type: "error", message });
+    }
+
+    response.write("data: [DONE]\n\n");
+    response.end();
   });
 
   return app;
