@@ -18,6 +18,7 @@
     "probe:app-server": "tsx scripts/probe-app-server.ts",
     "smoke:router": "tsx scripts/smoke-router.ts",
     "smoke:delegate": "tsx scripts/smoke-delegate.ts",
+    "smoke:delegatecodex-v2": "tsx scripts/smoke-delegatecodex-v2.ts",
     "smoke:refine": "tsx scripts/smoke-refine.ts",
     "smoke:review": "tsx scripts/smoke-review.ts",
     "smoke:adversarial-review": "tsx scripts/smoke-adversarial-review.ts",
