@@ -16,9 +16,11 @@ export class ClaudeSubprocessManager {
    * Prompt is written to stdin. Returns trimmed stdout on success.
    * Throws on timeout, non-zero exit, or empty response.
    */
-  async call(prompt: string, timeoutMs = DEFAULT_CALL_TIMEOUT_MS): Promise<string> {
+  async call(prompt: string, timeoutMs = DEFAULT_CALL_TIMEOUT_MS, model?: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      const proc = spawn("claude", ["--print", "--dangerously-skip-permissions"], {
+      const args = ["--print", "--dangerously-skip-permissions"];
+      if (model) args.push("--model", model);
+      const proc = spawn("claude", args, {
         stdio: ["pipe", "pipe", "pipe"],
         cwd: this.config.codex.cwd
       });

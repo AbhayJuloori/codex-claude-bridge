@@ -26,6 +26,8 @@ import { delegateManifestSchema } from "./delegation/manifest.js";
 import { DelegationOrchestrator } from "./delegation/orchestrator.js";
 import { ClaudeSubprocessManager } from "./claude/subprocess.js";
 import { createBaseAdapter } from "./adapters/index.js";
+import { runPipeline } from "./pipeline/pipeline.js";
+import type { PipelineResult } from "./pipeline/types.js";
 
 function getRequestId(): string {
   return crypto.randomUUID();
@@ -86,6 +88,7 @@ export function createServer(config: BridgeConfig, logger: Logger, adapter: Code
   const delegateClaude = new ClaudeSubprocessManager(config, logger);
   const delegationOrchestrator = new DelegationOrchestrator(config, logger, delegateWorker, delegateClaude);
   let lastProbe: unknown = null;
+  let pipelineGlobalEnabled = config.runtime.pipelineEnabled;
 
   function handleAdapterEvent(
     event: AdapterEvent,
@@ -234,6 +237,22 @@ export function createServer(config: BridgeConfig, logger: Logger, adapter: Code
         codexMcpServers: context.codex.mcpServers.length
       }
     });
+  });
+
+  app.get("/pipeline/status", (_request, response) => {
+    response.json({ enabled: pipelineGlobalEnabled });
+  });
+
+  app.post("/pipeline/enable", (_request, response) => {
+    pipelineGlobalEnabled = true;
+    logger.info("http", "pipeline routing enabled");
+    response.json({ enabled: true });
+  });
+
+  app.post("/pipeline/disable", (_request, response) => {
+    pipelineGlobalEnabled = false;
+    logger.info("http", "pipeline routing disabled");
+    response.json({ enabled: false });
   });
 
   app.get("/diagnostics/config", (_request, response) => {
@@ -480,6 +499,125 @@ export function createServer(config: BridgeConfig, logger: Logger, adapter: Code
         status: job.status,
         polling_url: `/jobs/${job.id}`,
         events_url: `/jobs/${job.id}/events`
+      });
+      return;
+    }
+
+    // Per-request header overrides global toggle
+    const pipelineHeaderRaw = request.header("x-pipeline-enabled");
+    const pipelineEnabled =
+      pipelineHeaderRaw !== undefined
+        ? ["1", "true", "yes"].includes(pipelineHeaderRaw.toLowerCase())
+        : pipelineGlobalEnabled;
+
+    let pipelineResult: PipelineResult | undefined;
+
+    if (pipelineEnabled) {
+      try {
+        pipelineResult = await runPipeline(task, delegateClaude, delegateWorker);
+      } catch (error) {
+        // runPipeline only throws on architectural violations; log and fall through to adapter
+        logger.warn("http", "pipeline threw unexpected error, falling through to adapter", {
+          requestId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+
+      // escalated/ambiguous → let adapter handle; Haiku unavailable → fall through too
+      if (
+        pipelineResult?.status === "escalated" ||
+        pipelineResult?.status === "ambiguous" ||
+        (pipelineResult?.status === "failed" && pipelineResult.output.startsWith("Haiku classifier unavailable:"))
+      ) {
+        pipelineResult = undefined;
+      }
+    }
+
+    if (
+      pipelineResult?.status === "completed" ||
+      pipelineResult?.status === "failed" ||
+      pipelineResult?.status === "needs_user_input"
+    ) {
+      const outputTokens = estimateTokensFromText(pipelineResult.output);
+
+      logger.info("http", "pipeline intercepted anthropic request", {
+        requestId,
+        sessionId,
+        pipelineStatus: pipelineResult.status,
+        stepsExecuted: pipelineResult.steps_executed
+      });
+
+      sessions.appendMessages(sessionId, [
+        {
+          ts: new Date().toISOString(),
+          role: "assistant",
+          content: pipelineResult.output,
+          requestId
+        }
+      ]);
+
+      if (pipelineResult.status === "completed") {
+        sessions.appendEvent(sessionId, {
+          type: "request.completed",
+          requestId,
+          finalText: pipelineResult.output
+        });
+        hooks.emit({
+          name: "request.completed",
+          payload: {
+            requestId,
+            sessionId,
+            finalText: pipelineResult.output
+          }
+        });
+      } else if (pipelineResult.status === "failed") {
+        sessions.appendEvent(sessionId, {
+          type: "request.failed",
+          requestId,
+          error: pipelineResult.output
+        });
+        hooks.emit({
+          name: "request.failed",
+          payload: {
+            requestId,
+            sessionId,
+            error: pipelineResult.output
+          }
+        });
+      }
+
+      if (task.stream) {
+        response.status(pipelineResult.status === "failed" ? 500 : 200);
+        initializeAnthropicSse(response, messageId, task.requestedModel, estimatedInputTokens);
+
+        if (pipelineResult.output) {
+          writeAnthropicTextDelta(response, pipelineResult.output);
+        }
+
+        finalizeAnthropicSse(response, pipelineResult.output, {
+          input_tokens: estimatedInputTokens,
+          output_tokens: outputTokens
+        });
+        return;
+      }
+
+      response.status(pipelineResult.status === "failed" ? 500 : 200).json({
+        id: messageId,
+        type: "message",
+        role: "assistant",
+        model: task.requestedModel,
+        content: [
+          {
+            type: "text",
+            text: pipelineResult.output
+          }
+        ],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: {
+          input_tokens: estimatedInputTokens,
+          output_tokens: outputTokens
+        }
       });
       return;
     }
@@ -768,6 +906,124 @@ export function createServer(config: BridgeConfig, logger: Logger, adapter: Code
       const message = err instanceof Error ? err.message : String(err);
       logger.error("delegate", "delegation failed", { requestId, error: message });
       response.write(`data: ${JSON.stringify({ type: "error", message })}\n\n`);
+    }
+
+    response.write("data: [DONE]\n\n");
+    response.end();
+  });
+
+  app.post("/pipeline", async (request: Request, response: Response) => {
+    const body = request.body as { prompt?: string };
+    const prompt = body.prompt?.trim();
+
+    if (!prompt) {
+      response.status(400).json({ error: "prompt required" });
+      return;
+    }
+
+    const requestId = getRequestId();
+    const sessionId = getSessionId(request);
+    const context = compatibilityLoader.load();
+
+    const baseTask: InternalTask = {
+      requestId,
+      sessionId,
+      requestedModel: "codex",
+      maxTokens: 8192,
+      stream: false,
+      systemPrompt: "",
+      messages: [{ role: "user", content: prompt }],
+      tools: [],
+      prompt,
+      sourceRequest: {
+        model: "codex",
+        max_tokens: 8192,
+        stream: false,
+        messages: [{ role: "user", content: prompt }]
+      },
+      compatibilityContext: context,
+      permissionContext: {
+        mode: "default",
+        rules: [],
+        canEdit: true,
+        canRunCommands: true,
+        sandbox: config.codex.sandbox,
+        appServerApprovalPolicy: "on-request",
+        parityNotes: []
+      },
+      selectedSkills: [],
+      selectedAgent: null,
+      inputItems: [{ type: "text", text: prompt }]
+    };
+
+    try {
+      const result = await runPipeline(baseTask, delegateClaude, delegateWorker);
+      response.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      response.status(500).json({ error: message });
+    }
+  });
+
+  app.post("/delegatecodex", async (request: Request, response: Response) => {
+    const task = (request.body as { task?: string }).task?.trim();
+    if (!task) {
+      response.status(400).json({ error: "task required" });
+      return;
+    }
+
+    const requestId = getRequestId();
+    const sessionId = getSessionId(request);
+    const context = compatibilityLoader.load();
+
+    response.setHeader("Content-Type", "text/event-stream");
+    response.setHeader("Cache-Control", "no-cache");
+    response.setHeader("Connection", "keep-alive");
+    response.flushHeaders();
+
+    const write = (payload: unknown) =>
+      response.write(`data: ${JSON.stringify(payload)}\n\n`);
+
+    const baseTask: InternalTask = {
+      requestId,
+      sessionId,
+      requestedModel: "codex",
+      maxTokens: 8192,
+      stream: false,
+      systemPrompt: "",
+      messages: [{ role: "user", content: task }],
+      tools: [],
+      prompt: task,
+      sourceRequest: {
+        model: "codex",
+        max_tokens: 8192,
+        stream: false,
+        messages: [{ role: "user", content: task }]
+      },
+      compatibilityContext: context,
+      permissionContext: {
+        mode: "default",
+        rules: [],
+        canEdit: true,
+        canRunCommands: true,
+        sandbox: config.codex.sandbox,
+        appServerApprovalPolicy: "on-request",
+        parityNotes: []
+      },
+      selectedSkills: [],
+      selectedAgent: null,
+      inputItems: [{ type: "text", text: task }]
+    };
+
+    try {
+      const result = await runPipeline(baseTask, delegateClaude, delegateWorker, {
+        onProgress: (event) => write(event)
+      });
+      write({ type: "result", ...result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error("delegatecodex", "pipeline failed", { requestId, error: message });
+      write({ type: "error", message });
     }
 
     response.write("data: [DONE]\n\n");
