@@ -28,6 +28,8 @@ import { ClaudeSubprocessManager } from "./claude/subprocess.js";
 import { createBaseAdapter } from "./adapters/index.js";
 import { runPipeline } from "./pipeline/pipeline.js";
 import type { PipelineResult } from "./pipeline/types.js";
+import { runDelegatecodex } from "./delegatecodex/delegatecodex.js";
+import type { DelegatecodexResult } from "./delegatecodex/types.js";
 
 function getRequestId(): string {
   return crypto.randomUUID();
@@ -965,7 +967,47 @@ export function createServer(config: BridgeConfig, logger: Logger, adapter: Code
     }
   });
 
+  // /delegatecodex — v2: Claude-dispatcher + Codex-executor + Claude-judge
   app.post("/delegatecodex", async (request: Request, response: Response) => {
+    const task = (request.body as { task?: string }).task?.trim();
+    if (!task) {
+      response.status(400).json({ error: "task required" });
+      return;
+    }
+
+    const requestId = getRequestId();
+
+    response.setHeader("Content-Type", "text/event-stream");
+    response.setHeader("Cache-Control", "no-cache");
+    response.setHeader("Connection", "keep-alive");
+    response.flushHeaders();
+
+    const write = (payload: unknown) =>
+      response.write(`data: ${JSON.stringify(payload)}\n\n`);
+
+    try {
+      const result: DelegatecodexResult = await runDelegatecodex(
+        task,
+        config,
+        logger,
+        delegateClaude,
+        {
+          onProgress: (event) => write(event),
+        }
+      );
+      write({ type: "result", ...result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error("delegatecodex-v2", "pipeline failed", { requestId, error: message });
+      write({ type: "error", message });
+    }
+
+    response.write("data: [DONE]\n\n");
+    response.end();
+  });
+
+  // /delegatecodex-old — v1 compatibility path (src/pipeline/ unchanged)
+  app.post("/delegatecodex-old", async (request: Request, response: Response) => {
     const task = (request.body as { task?: string }).task?.trim();
     if (!task) {
       response.status(400).json({ error: "task required" });
@@ -1022,7 +1064,7 @@ export function createServer(config: BridgeConfig, logger: Logger, adapter: Code
       write({ type: "result", ...result });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      logger.error("delegatecodex", "pipeline failed", { requestId, error: message });
+      logger.error("delegatecodex-old", "pipeline failed", { requestId, error: message });
       write({ type: "error", message });
     }
 
